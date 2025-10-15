@@ -938,11 +938,19 @@ foreach ($criteria as $cr) {
 
 								<?php if (!$all_done): ?>
 								<div class="d-flex justify-content-end" style="margin-top: 24px; gap: 10px;">
-									<button type="submit" class="submit-btn" <?= ($count > 0) ? 'disabled' : '' ?>>
-										Submit <?= htmlspecialchars($cr['name']) ?> Scores
-									</button>
-								</div>
-								<?php endif; ?>
+                                    <?php if ($count > 0): ?>
+                                        <!-- Completed: show a clickable button that goes to next category -->
+                                        <button type="button" class="submit-btn submit-next-btn" data-criteria-id="<?= (int)$cr['id'] ?>">
+                                            Completed — Next (<?= htmlspecialchars($cr['name']) ?>)
+                                        </button>
+                                    <?php else: ?>
+                                        <!-- Active submit (will be submitted via AJAX) -->
+                                        <button type="submit" class="submit-btn submit-save-btn" data-criteria-id="<?= (int)$cr['id'] ?>">
+                                            Submit <?= htmlspecialchars($cr['name']) ?> Scores
+                                        </button>
+                                    <?php endif; ?>
+                                </div>
+                                <?php endif; ?>
 								</form>
 						</div>
 					</div>
@@ -967,230 +975,296 @@ const Toast = Swal.mixin({
 document.addEventListener('DOMContentLoaded', function(){
     const JUDGE_ID = <?= (int)$judge_id ?>;
     const YEAR = <?= json_encode($year) ?>;
-    function getDraftKey(criteriaId) { return `draftScores_${YEAR}_${JUDGE_ID}_${criteriaId}`; }
-    function getQueueKey() { return `scoreQueue_${YEAR}_${JUDGE_ID}`; }
-    function readJSON(key, fallback){ try { return JSON.parse(localStorage.getItem(key) || 'null') ?? fallback; } catch { return fallback; } }
-    function writeJSON(key, val){ try { localStorage.setItem(key, JSON.stringify(val)); } catch {} }
-    function enqueueScore(item){ const key = getQueueKey(); const q = readJSON(key, []); q.push(item); writeJSON(key, q); }
+    const DRAFT_PREFIX = `draftScores_${YEAR}_${JUDGE_ID}_`; // append criteria id
+    const QUEUE_KEY = `scoreQueue_${YEAR}_${JUDGE_ID}`;
 
-    // Flush queue: try all pending items concurrently; keep failures
-    async function flushQueue(){
-        const key = getQueueKey();
-        let q = readJSON(key, []);
-        if (!q || !q.length) return;
-        const pending = [...q];
-        const results = await Promise.allSettled(pending.map(it => {
-            const payload = new URLSearchParams();
-            payload.append('candidate_id', it.candidate_id);
-            payload.append('criteria_id', it.criteria_id);
-            payload.append('score', it.score);
-            return fetch('autosave_score.php', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body: payload.toString() })
-                .then(async r => {
-                    const data = await r.json().catch(()=>({ok:false}));
-                    return r.ok && data && data.ok;
-                })
-                .catch(()=>false);
-        }));
-        const kept = pending.filter((_, i) => results[i].status !== 'fulfilled' || results[i].value === false);
-        writeJSON(key, kept);
+    function readJSON(key, fallback) {
+        try { return JSON.parse(localStorage.getItem(key) || 'null') ?? fallback; } catch { return fallback; }
+    }
+    function writeJSON(key, val) {
+        try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
+    }
+    function enqueue(item) {
+        const q = readJSON(QUEUE_KEY, []);
+        q.push(item);
+        writeJSON(QUEUE_KEY, q);
+    }
+
+    // Accepts either application/json or form format on server; use JSON here.
+    async function sendToServer(candidate_id, criteria_id, score) {
+        try {
+            const body = { candidate_id: candidate_id, criteria_id: criteria_id, score: String(score) };
+            const res = await fetch('autosave_score.php', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+                credentials: 'same-origin'
+            });
+            const data = await res.json().catch(()=>({ok:false}));
+            if (res.ok && data && data.ok) return { ok: true };
+            return { ok: false, data };
+        } catch (err) {
+            return { ok: false, error: err };
+        }
+    }
+
+    // Flush queue sequentially (keeps order). Successful items removed.
+    async function flushQueue() {
+        const q = readJSON(QUEUE_KEY, []);
+        if (!Array.isArray(q) || q.length === 0) return;
+        const kept = [];
+        for (const item of q) {
+            const r = await sendToServer(item.candidate_id, item.criteria_id, item.score);
+            if (!r.ok) {
+                kept.push(item);
+            } else {
+                // on success remove local draft for that candidate/criteria if present
+                try {
+                    const k = DRAFT_PREFIX + item.criteria_id;
+                    const draft = readJSON(k, {});
+                    if (draft && draft[item.candidate_id] !== undefined) {
+                        delete draft[item.candidate_id];
+                        writeJSON(k, draft);
+                    }
+                } catch {}
+            }
+        }
+        writeJSON(QUEUE_KEY, kept);
+        if (kept.length === 0) {
+            console.debug('Autosave queue flushed');
+        } else {
+            console.debug('Autosave queue kept', kept);
+        }
     }
 
     window.addEventListener('online', () => { flushQueue().catch(()=>{}); });
 
-    // Tabs
-    const tabButtons = document.querySelectorAll('.tabs .tab');
-    const tabPanes = document.querySelectorAll('.tab-pane');
-
-    function getActiveTabMax() {
-        const activeTab = document.querySelector('.tab-pane.show.active');
-        if (activeTab) {
-            const scoreInput = activeTab.querySelector('.score-input:not([disabled])');
-            if (scoreInput) return parseFloat(scoreInput.getAttribute('max')) || 120;
-        }
-        return 120;
+    // Simple debounce
+    function debounce(fn, wait) {
+        let t;
+        return function(...a) { clearTimeout(t); t = setTimeout(() => fn.apply(this, a), wait); };
     }
 
-    tabButtons.forEach((btn) => {
-        btn.addEventListener('click', function(e) {
-            e.preventDefault();
-            tabButtons.forEach(t => t.classList.remove('active'));
-            tabPanes.forEach(p => p.classList.remove('show', 'active'));
-            this.classList.add('active');
-            const targetId = this.getAttribute('data-bs-target');
-            const targetPane = document.querySelector(targetId);
-            if (targetPane) targetPane.classList.add('show', 'active');
-        });
-    });
+    // Only allow final numeric values like "1" or "1.2" (no trailing dot)
+    function isFinalNumber(s) {
+        return typeof s === 'string' && /^\d+(\.\d+)?$/.test(s);
+    }
 
-    // Debounce helper
-    const debounce = (fn, delay) => { let t; return (...args) => { clearTimeout(t); t = setTimeout(() => fn.apply(null, args), delay); }; };
-
-    // Per-input inflight tracking so simultaneous edits don't conflict
-    const inflight = {}; // key -> { controller, lastValue }
-    function makeKey(criteriaId, candidateId){ return `${criteriaId}_${candidateId}`; }
-
-    // Autosave network function (debounced below). Saves local draft immediately.
-    const autosaveNetwork = debounce((el) => {
-        const val = el.value;
-        const candidateId = el.getAttribute('data-candidate-id');
-        const criteriaId = el.getAttribute('data-criteria-id');
-        if (val === "" || isNaN(val) || !candidateId || !criteriaId) return;
-
-        // Save draft locally immediately for offline safety
-        const draftKey = getDraftKey(criteriaId);
-        const draft = readJSON(draftKey, {});
-        draft[candidateId] = val;
-        writeJSON(draftKey, draft);
-
-        const payload = new URLSearchParams();
-        payload.append('candidate_id', candidateId);
-        payload.append('criteria_id', criteriaId);
-        payload.append('score', val);
-
-        const key = makeKey(criteriaId, candidateId);
-
-        // Abort previous in-flight request for same input so latest wins
-        if (inflight[key] && inflight[key].controller) {
-            try { inflight[key].controller.abort(); } catch(e) {}
-        }
-
-        const controller = new AbortController();
-        inflight[key] = { controller, lastValue: val };
-
-        // Visual non-blocking hint
-        el.dataset.saving = '1';
-
-        fetch('autosave_score.php', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body: payload.toString(), signal: controller.signal })
-            .then(async r => {
-                const data = await r.json().catch(()=>({ ok:false }));
-                if (controller.signal.aborted) return; // silently ignore aborted requests
-                if (r.ok && data && data.ok) {
-                    delete inflight[key];
-                    delete el.dataset.saving;
-                    Toast.fire({ icon: 'success', title: 'Saved successfully' });
-                    // attempt to flush queued items if any
-                    flushQueue().catch(()=>{});
-                } else {
-                    delete inflight[key];
-                    delete el.dataset.saving;
-                    enqueueScore({ candidate_id: candidateId, criteria_id: criteriaId, score: val, ts: Date.now() });
-                    Toast.fire({ icon: 'error', title: 'Error saving data' });
-                }
-            })
-            .catch(err => {
-                // Abort is normal when a newer request is sent — don't show error toast
-                if (err && err.name === 'AbortError') return;
-                delete inflight[key];
-                delete el.dataset.saving;
-                enqueueScore({ candidate_id: candidateId, criteria_id: criteriaId, score: val, ts: Date.now() });
-                Toast.fire({ icon: 'error', title: 'Error saving data' });
-            });
-    }, 400);
-
-    // Attach to all score inputs per form
+    // Attach handlers
     const forms = document.querySelectorAll('.criteria-form');
     forms.forEach(form => {
-        function collectInputs() { return Array.from(form.querySelectorAll('.score-input:not([disabled])')); }
+        const inputs = Array.from(form.querySelectorAll('.score-input:not([disabled])'));
 
-        function validateInput(input) {
-            const value = parseFloat(input.value);
-            const min = parseFloat(input.min) || 1;
-            const max = parseFloat(input.getAttribute('max')) || 120;
-            if (input.value && (isNaN(value) || value < min || value > max)) {
-                input.classList.add('error');
-                setTimeout(() => input.classList.remove('error'), 400);
-                return false;
-            } else {
-                input.classList.remove('error');
-                return true;
+        // Preload draft (if any)
+        const criteriaId = form.dataset.criteriaId || form.getAttribute('data-criteria-id') || form.querySelector('input[name="criteria_id"]')?.value;
+        if (criteriaId) {
+            const draft = readJSON(DRAFT_PREFIX + criteriaId, {});
+            if (draft && typeof draft === 'object') {
+                Object.entries(draft).forEach(([cid, val]) => {
+                    const inp = form.querySelector(`.score-input[data-candidate-id="${cid}"]`);
+                    if (inp && !inp.disabled && (inp.value === '' || inp.value === null)) inp.value = val;
+                });
             }
         }
 
-        const inputs = collectInputs();
-        inputs.forEach(input => {
-            // sanitize on input, debounce autosave
-            input.addEventListener('input', function() {
-                // only allow digits and single decimal point
-                if (this.value && !/^[0-9]*\.?[0-9]*$/.test(this.value)) {
-                    this.value = this.value.replace(/[^\d.]/g, '');
-                }
-                const value = parseFloat(this.value);
-                const activeTabMax = getActiveTabMax();
-                if (!isNaN(value) && value > activeTabMax) {
-                    this.value = activeTabMax.toString();
-                    Toast.fire({ icon:'error', title: `Max is ${activeTabMax}` });
-                }
-                validateInput(this);
-                autosaveNetwork(this);
-            });
+        // per-input debounce sender
+        const sendCache = {}; // key -> debounce function
+        inputs.forEach(inp => {
+            const cid = inp.getAttribute('data-candidate-id');
+            const crid = inp.getAttribute('data-criteria-id');
+            const key = `${crid}_${cid}`;
 
-            // ensure save on blur/change
-            input.addEventListener('change', function() {
-                validateInput(this);
-                autosaveNetwork(this);
-            });
+            // local draft write
+            function saveDraft(val) {
+                try {
+                    const k = DRAFT_PREFIX + crid;
+                    const d = readJSON(k, {});
+                    d[cid] = val;
+                    writeJSON(k, d);
+                } catch {}
+            }
 
-            // prevent invalid characters at keypress
-            input.addEventListener('keypress', function(e) {
-                const char = String.fromCharCode(e.which || e.keyCode);
-                const currentValue = this.value || '';
-                const activeTabMax = getActiveTabMax();
-                if (!/[0-9.]/.test(char)) {
-                    e.preventDefault();
-                    this.classList.add('error');
-                    setTimeout(()=>this.classList.remove('error'), 300);
+            // network send wrapper (debounced)
+            const trySend = debounce(async function(value) {
+                // Only send final numeric values to server
+                if (value === '' || !isFinalNumber(value)) {
+                    saveDraft(value);
                     return;
                 }
-                if (char === '.' && currentValue.includes('.')) { e.preventDefault(); return; }
-                const newValue = currentValue + char;
-                if (!isNaN(parseFloat(newValue)) && parseFloat(newValue) > activeTabMax) {
-                    e.preventDefault();
-                    this.classList.add('error');
-                    setTimeout(()=>this.classList.remove('error'), 300);
-                    Toast.fire({ icon:'error', title: `Max is ${activeTabMax}` });
+                saveDraft(value);
+
+                // Attempt network send
+                const r = await sendToServer(cid, crid, value);
+                if (r.ok) {
+                    // success -> remove draft for this candidate
+                    try {
+                        const k = DRAFT_PREFIX + crid;
+                        const d = readJSON(k, {});
+                        if (d && d[cid] !== undefined) {
+                            delete d[cid];
+                            writeJSON(k, d);
+                        }
+                    } catch {}
+                    Toast.fire({ icon: 'success', title: 'Saved' });
+                    // flush queue in case previous items exist
+                    flushQueue().catch(()=>{});
+                } else {
+                    // network/server error -> enqueue for later retry
+                    enqueue({ candidate_id: cid, criteria_id: crid, score: value, ts: Date.now() });
+                    Toast.fire({ icon: 'info', title: 'Saved locally (will retry)' });
                 }
+            }, 700);
+
+            sendCache[key] = trySend;
+
+            // input sanitization and live validation
+            inp.addEventListener('input', function() {
+                // strip invalid chars (allow digits and dot)
+                const raw = this.value;
+                const clean = raw.replace(/[^0-9.]/g, '');
+                if (clean !== raw) this.value = clean;
+                // cap to max if numeric
+                const v = parseFloat(this.value);
+                const max = parseFloat(this.getAttribute('max')) || 120;
+                if (!isNaN(v) && v > max) {
+                    this.value = max.toString();
+                    Toast.fire({ icon:'error', title: `Max is ${max}` });
+                }
+                // schedule autosave
+                trySend(this.value);
             });
 
-            // Enter moves to next input (don't submit form)
-            input.addEventListener('keydown', function(e) {
+            // ensure save on blur/change (immediate)
+            inp.addEventListener('change', function() {
+                const val = this.value;
+                saveDraft(val);
+                // immediate attempt
+                (async () => {
+                    if (val === '' || !isFinalNumber(val)) {
+                        Toast.fire({ icon:'warning', title:'Enter a valid number' });
+                        return;
+                    }
+                    const r = await sendToServer(cid, crid, val);
+                    if (r.ok) {
+                        // Toast.fire({ icon: 'success', title: 'Saved' });
+                        // remove draft entry
+                        try {
+                            const k = DRAFT_PREFIX + crid;
+                            const d = readJSON(k, {});
+                            if (d && d[cid] !== undefined) {
+                                delete d[cid];
+                                writeJSON(k, d);
+                            }
+                        } catch {}
+                    } else {
+                        enqueue({ candidate_id: cid, criteria_id: crid, score: val, ts: Date.now() });
+                        Toast.fire({ icon:'info', title:'Saved locally (will retry)' });
+                    }
+                })();
+            });
+
+            // friendly Enter to move
+            inp.addEventListener('keydown', function(e) {
                 if (e.key === 'Enter') {
                     e.preventDefault();
-                    const all = collectInputs();
+                    const all = inputs;
                     const idx = all.indexOf(this);
                     if (idx >= 0 && idx < all.length - 1) {
-                        all[idx + 1].focus();
-                        all[idx + 1].select();
+                        all[idx+1].focus();
+                        all[idx+1].select();
                     }
                 }
             });
         });
 
-        // Keep default form submit behavior for final submit button (if used) --
-        // the autosave already keeps DB up-to-date with status=0. Final submit should call submit_scores.php to set status=1.
-        form.addEventListener('submit', function(e) {
-            // validate before allowing final submit
-            const now = collectInputs();
+        // on form submit, validate all visible inputs
+        form.addEventListener('submit', async function(e) {
+            e.preventDefault();
+            const visibleInputs = Array.from(form.querySelectorAll('.score-input:not([disabled])')).filter(i => i.offsetParent !== null);
             let invalid = null;
-            now.forEach(inp => {
+            visibleInputs.forEach(inp => {
                 const v = inp.value;
                 const min = Number(inp.min) || 1;
                 const max = Number(inp.max) || 120;
                 if (!v || isNaN(Number(v)) || Number(v) < min || Number(v) > max) invalid = invalid || inp;
             });
             if (invalid) {
-                e.preventDefault();
                 invalid.focus();
                 Toast.fire({ icon:'error', title: 'Please fix invalid scores' });
                 return false;
             }
-            // allow submit to server for finalizing (server should set status=1)
+
+            // Try to flush local queue first (best-effort)
+            await flushQueue().catch(()=>{});
+
+            // Build FormData (submit_scores.php expects POST)
+            const fd = new FormData(form);
+
+            try {
+                const res = await fetch(form.action || 'submit_scores.php', {
+                    method: 'POST',
+                    body: fd,
+                    credentials: 'same-origin'
+                });
+                // Expect JSON { ok: true } from submit_scores.php — tolerant if it's plain 200
+                const data = await res.json().catch(()=>null);
+                if (res.ok && (data === null || data.ok)) {
+                    // mark inputs disabled (finalized)
+                    visibleInputs.forEach(i => i.disabled = true);
+                    // update button to Completed — Next
+                    const btn = form.querySelector('.submit-btn');
+                    if (btn) {
+                        btn.textContent = 'Completed — Next';
+                        btn.classList.add('submit-next-btn');
+                        // ensure it's type=button so it doesn't submit again
+                        try { btn.type = 'button'; } catch {}
+                    }
+                    // mark tab button as completed (add badge if not present)
+                    const criteriaId = form.querySelector('input[name="criteria_id"]')?.value;
+                    if (criteriaId) {
+                        const tabBtn = document.querySelector(`[data-bs-target="#criteria-${criteriaId}"]`);
+                        if (tabBtn && !tabBtn.querySelector('.badge')) {
+                            const span = document.createElement('span');
+                            span.className = 'badge bg-success';
+                            span.textContent = '✓';
+                            tabBtn.appendChild(span);
+                        }
+                        // navigate to next tab
+                        const tabs = Array.from(document.querySelectorAll('.tabs .tab'));
+                        const idx = tabs.findIndex(t => t.getAttribute('data-bs-target') === `#criteria-${criteriaId}`);
+                        // find next visible tab after current; fallback to next index
+                        let next = null;
+                        for (let i = idx + 1; i < tabs.length; i++) {
+                            if (tabs[i].offsetParent !== null) { next = tabs[i]; break; }
+                        }
+                        if (!next) {
+                            // wrap to first visible tab
+                            next = tabs.find(t => t.offsetParent !== null && t !== tabs[idx]);
+                        }
+                        if (next) next.click();
+                    }
+                    Toast.fire({ icon:'success', title: 'Submitted' });
+                    return true;
+                } else {
+                    Toast.fire({ icon:'error', title: 'Submit failed' });
+                }
+            } catch (err) {
+                Toast.fire({ icon:'error', title: 'Network error — try again' });
+            }
+
+            // On failure, still attempt to enqueue and let autosave handle retries
+            const criteriaId = form.querySelector('input[name="criteria_id"]')?.value;
+            visibleInputs.forEach(inp => {
+                enqueue({ candidate_id: inp.getAttribute('data-candidate-id'), criteria_id: criteriaId, score: inp.value, ts: Date.now() });
+            });
+            Toast.fire({ icon:'info', title: 'Saved locally (will retry)' });
         });
     });
 
-    // Restore drafts on load from localStorage if inputs empty
-    tabPanes.forEach(pane => {
+    // Restore drafts globally (for inputs that weren't filled)
+    document.querySelectorAll('.tab-pane').forEach(pane => {
         const criteriaId = pane.id.replace('criteria-','');
-        const draft = readJSON(getDraftKey(criteriaId), {});
+        const draft = readJSON(DRAFT_PREFIX + criteriaId, {});
         if (draft && typeof draft === 'object') {
             Object.entries(draft).forEach(([cid, val]) => {
                 const inp = pane.querySelector(`.score-input[data-candidate-id="${cid}"]`);
@@ -1199,17 +1273,114 @@ document.addEventListener('DOMContentLoaded', function(){
         }
     });
 
-    // Gender filter
-    const radios = document.querySelectorAll('input[name="judgeGender"]');
-    function applyGenderFilter() {
-        const val = document.querySelector('input[name="judgeGender"]:checked').value;
-        const maleSections = document.querySelectorAll('[id^="maleSection-"]');
-        const femaleSections = document.querySelectorAll('[id^="femaleSection-"]');
-        maleSections.forEach(el => el.style.display = (val === 'both' || val === 'male') ? '' : 'none');
-        femaleSections.forEach(el => el.style.display = (val === 'both' || val === 'female') ? '' : 'none');
+    // Try to flush queue before unload (best-effort)
+    window.addEventListener('beforeunload', function() {
+        // flushQueue returns a promise; synchronous flush isn't possible but call it
+        flushQueue();
+    });
+
+    // allow "Completed — Next" buttons to jump to the next category
+    document.addEventListener('click', function(e){
+        const btn = e.target.closest('.submit-next-btn');
+        if (!btn) return;
+        const criteriaId = btn.dataset.criteriaId || btn.getAttribute('data-criteria-id');
+        if (!criteriaId) return;
+        const tabs = Array.from(document.querySelectorAll('.tabs .tab'));
+        const idx = tabs.findIndex(t => t.getAttribute('data-bs-target') === `#criteria-${criteriaId}`);
+        let next = null;
+        for (let i = idx + 1; i < tabs.length; i++) {
+            if (tabs[i].offsetParent !== null) { next = tabs[i]; break; }
+        }
+        if (!next) next = tabs.find(t => t.offsetParent !== null && t !== tabs[idx]);
+        if (next) next.click();
+    });
+});
+</script>
+<script>
+/* Simple tab switching if Bootstrap JS isn't loaded */
+document.addEventListener('DOMContentLoaded', function(){
+    const tabButtons = Array.from(document.querySelectorAll('[data-bs-toggle="tab"]'));
+    if (!tabButtons.length) return;
+
+    function deactivateAll() {
+        // deactivate buttons
+        tabButtons.forEach(b => {
+            b.classList.remove('active');
+            b.setAttribute('aria-selected', 'false');
+        });
+        // hide panes
+        document.querySelectorAll('.tab-pane').forEach(p => {
+            p.classList.remove('show','active');
+            p.setAttribute('aria-hidden', 'true');
+        });
     }
-    radios.forEach(r => r.addEventListener('change', applyGenderFilter));
-    applyGenderFilter();
+
+    function activateButton(btn) {
+        // deactivate siblings in same tabs container
+        const container = btn.closest('.tabs') || document;
+        container.querySelectorAll('.btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        btn.setAttribute('aria-selected', 'true');
+    }
+
+    function showPane(selector) {
+        if (!selector) return;
+        const pane = document.querySelector(selector);
+        if (!pane) return;
+        // hide others then show target
+        document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('show','active'));
+        pane.classList.add('show','active');
+        pane.setAttribute('aria-hidden', 'false');
+        // // scroll into view a little if needed
+        // pane.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    // wire clicks
+    tabButtons.forEach(btn => {
+        btn.addEventListener('click', function(e){
+            e.preventDefault();
+            activateButton(btn);
+            const target = btn.getAttribute('data-bs-target') || btn.getAttribute('href');
+            showPane(target);
+            // update URL hash without jumping
+            try {
+                const hash = (target && target.startsWith('#')) ? target : null;
+                if (hash) history.replaceState(null, '', hash);
+            } catch (err) {}
+        });
+    });
+
+    // Support hash on load: show tab matching location.hash if present
+    const initialHash = window.location.hash;
+    if (initialHash) {
+        const targetBtn = tabButtons.find(b => (b.getAttribute('data-bs-target') === initialHash || b.getAttribute('href') === initialHash));
+        if (targetBtn) {
+            activateButton(targetBtn);
+            showPane(initialHash);
+        }
+    } else {
+        // ensure first active tab/pane are consistent
+        const firstBtn = tabButtons.find(b => b.classList.contains('active')) || tabButtons[0];
+        if (firstBtn) {
+            activateButton(firstBtn);
+            const target = firstBtn.getAttribute('data-bs-target') || firstBtn.getAttribute('href');
+            showPane(target);
+        }
+    }
+
+    // Optional keyboard navigation (left/right)
+    document.addEventListener('keydown', function(e){
+        if (!['ArrowLeft','ArrowRight'].includes(e.key)) return;
+        const visibleTabs = tabButtons.filter(b => b.offsetParent !== null);
+        if (!visibleTabs.length) return;
+        const activeIndex = visibleTabs.findIndex(b => b.classList.contains('active'));
+        if (activeIndex === -1) return;
+        let next = activeIndex;
+        if (e.key === 'ArrowRight') next = (activeIndex + 1) % visibleTabs.length;
+        if (e.key === 'ArrowLeft') next = (activeIndex - 1 + visibleTabs.length) % visibleTabs.length;
+        const btn = visibleTabs[next];
+        if (btn) { btn.click(); btn.focus(); }
+    });
 });
 </script>
 </body>
