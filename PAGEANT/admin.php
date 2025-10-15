@@ -38,61 +38,103 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 		}
 	}
 	if ($action === 'add_criteria') {
-		$year = get_post('criteria_year');
-		$name = get_post('criteria_name');
-		$percentage = (int)get_post('criteria_percentage');
-		if ($year && $name && $percentage > 0 && $percentage <= 100) {
-			// Check if criteria name already exists for this year
-			$check_name = $mysqli->prepare("SELECT id FROM tbl_criteria WHERE name = ? AND year = ?");
-			$check_name->bind_param('ss', $name, $year);
-			$check_name->execute();
-			$existing = $check_name->get_result()->fetch_assoc();
-			$check_name->close();
-			
-		if ($existing) {
-			header('Location: admin.php?year=' . urlencode($year) . '&msg=error:Criteria name "' . $name . '" already exists for this year.');
-			exit;
-		} else {
-				// Check total percentage doesn't exceed 100%
-				$check = $mysqli->prepare("SELECT SUM(percentage) as total FROM tbl_criteria WHERE year = ?");
-				$check->bind_param('s', $year);
-				$check->execute();
-				$result = $check->get_result()->fetch_assoc();
-				$check->close();
-				$current_total = (float)($result['total'] ?? 0);
-				
-				if ($current_total + $percentage <= 100) {
-					$stmt = $mysqli->prepare("INSERT INTO tbl_criteria (name, percentage, year) VALUES (?, ?, ?)");
-					$stmt->bind_param('sds', $name, $percentage, $year);
-					$stmt->execute();
-					$stmt->close();
-					if (isset($_POST['ajax']) && $_POST['ajax'] === '1') {
-						header('Content-Type: application/json');
-						echo json_encode(['ok' => true, 'message' => 'Criteria saved successfully.']);
-						exit;
-					}
-					header('Location: admin.php?year=' . urlencode($year) . '&msg=success:Criteria saved successfully.');
-					exit;
-				} else {
-					if (isset($_POST['ajax']) && $_POST['ajax'] === '1') {
-						header('Content-Type: application/json');
-						echo json_encode(['ok' => false, 'message' => 'Total percentage cannot exceed 100%. Current: ' . $current_total . '%, Adding: ' . $percentage . '%']);
-						exit;
-					}
-					header('Location: admin.php?year=' . urlencode($year) . '&msg=error:Total percentage cannot exceed 100%. Current: ' . $current_total . '%, Adding: ' . $percentage . '%');
-					exit;
-				}
-			}
-		} else {
-			if (isset($_POST['ajax']) && $_POST['ajax'] === '1') {
-				header('Content-Type: application/json');
-				echo json_encode(['ok' => false, 'message' => 'Invalid criteria data. Percentage must be 1-100.']);
-				exit;
-			}
-			header('Location: admin.php?year=' . urlencode($year) . '&msg=error:Invalid criteria data. Percentage must be 1-100.');
-			exit;
-		}
-	}
+        $year = get_post('criteria_year');
+        $name = trim(get_post('criteria_name'));
+        $percentage = (int)get_post('criteria_percentage');
+        if ($year && $name && $percentage > 0 && $percentage <= 100) {
+            // Check if criteria name already exists for this year (compatible with non-mysqlnd builds)
+            $check_name = $mysqli->prepare("SELECT id FROM tbl_criteria WHERE name = ? AND year = ? LIMIT 1");
+            if ($check_name) {
+                $check_name->bind_param('ss', $name, $year);
+                $check_name->execute();
+                $check_name->store_result();
+                $existing = false;
+                if ($check_name->num_rows > 0) {
+                    $check_name->bind_result($existing_id);
+                    $check_name->fetch();
+                    $existing = true;
+                }
+                $check_name->close();
+            } else {
+                // DB prepare error
+                if (isset($_POST['ajax']) && $_POST['ajax'] === '1') {
+                    header('Content-Type: application/json');
+                    echo json_encode(['ok' => false, 'message' => 'Database error (prepare).']);
+                    exit;
+                }
+                header('Location: admin.php?year=' . urlencode($year) . '&msg=error:Database error.');
+                exit;
+            }
+            
+            if ($existing) {
+                // Duplicate name
+                if (isset($_POST['ajax']) && $_POST['ajax'] === '1') {
+                    header('Content-Type: application/json');
+                    echo json_encode(['ok' => false, 'message' => 'Criteria name "' . $name . '" already exists for this year.']);
+                    exit;
+                }
+                header('Location: admin.php?year=' . urlencode($year) . '&msg=error:Criteria name "' . $name . '" already exists for this year.');
+                exit;
+            } else {
+                // Check total percentage doesn't exceed 100% (use bind_result to be compatible)
+                $check = $mysqli->prepare("SELECT COALESCE(SUM(percentage),0) as total FROM tbl_criteria WHERE year = ?");
+                if (!$check) {
+                    if (isset($_POST['ajax']) && $_POST['ajax'] === '1') {
+                        header('Content-Type: application/json');
+                        echo json_encode(['ok' => false, 'message' => 'Database error (prepare sum).']);
+                        exit;
+                    }
+                    header('Location: admin.php?year=' . urlencode($year) . '&msg=error:Database error.');
+                    exit;
+                }
+                $check->bind_param('s', $year);
+                $check->execute();
+                $check->bind_result($total_sum);
+                $check->fetch();
+                $check->close();
+                $current_total = (float)($total_sum ?? 0);
+                
+                if ($current_total + $percentage <= 100) {
+                    $stmt = $mysqli->prepare("INSERT INTO tbl_criteria (name, percentage, year) VALUES (?, ?, ?)");
+                    if (!$stmt) {
+                        if (isset($_POST['ajax']) && $_POST['ajax'] === '1') {
+                            header('Content-Type: application/json');
+                            echo json_encode(['ok' => false, 'message' => 'Database error (prepare insert).']);
+                            exit;
+                        }
+                        header('Location: admin.php?year=' . urlencode($year) . '&msg=error:Database error.');
+                        exit;
+                    }
+                    $stmt->bind_param('sis', $name, $percentage, $year);
+                    $stmt->execute();
+                    $stmt->close();
+                    if (isset($_POST['ajax']) && $_POST['ajax'] === '1') {
+                        header('Content-Type: application/json');
+                        echo json_encode(['ok' => true, 'message' => 'Criteria saved successfully.']);
+                        exit;
+                    }
+                    header('Location: admin.php?year=' . urlencode($year) . '&msg=success:Criteria saved successfully.');
+                    exit;
+                } else {
+                    if (isset($_POST['ajax']) && $_POST['ajax'] === '1') {
+                        header('Content-Type: application/json');
+                        echo json_encode(['ok' => false, 'message' => 'Total percentage cannot exceed 100%. Current: ' . $current_total . '%, Adding: ' . $percentage . '%']);
+                        exit;
+                    }
+                    header('Location: admin.php?year=' . urlencode($year) . '&msg=error:Total percentage cannot exceed 100%. Current: ' . $current_total . '%, Adding: ' . $percentage . '%');
+                    exit;
+                }
+            }
+        } else {
+            if (isset($_POST['ajax']) && $_POST['ajax'] === '1') {
+                header('Content-Type: application/json');
+                echo json_encode(['ok' => false, 'message' => 'Invalid criteria data. Percentage must be 1-100.']);
+                exit;
+            }
+            header('Location: admin.php?year=' . urlencode($year) . '&msg=error:Invalid criteria data. Percentage must be 1-100.');
+            exit;
+        }
+    }
 	if ($action === 'edit_criteria') {
 		$id = (int)get_post('criteria_id');
 		$name = get_post('criteria_name');
@@ -115,12 +157,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 				exit;
 			}
 			// Check total percentage doesn't exceed 100% (excluding current criteria)
-			$check = $mysqli->prepare("SELECT SUM(percentage) as total FROM tbl_criteria WHERE year = ? AND id != ?");
+			$check = $mysqli->prepare("SELECT COALESCE(SUM(percentage),0) as total FROM tbl_criteria WHERE year = ? AND id != ?");
 			$check->bind_param('si', $year, $id);
 			$check->execute();
-			$result = $check->get_result()->fetch_assoc();
+			$check->bind_result($total_sum);
+			$check->fetch();
 			$check->close();
-			$current_total = (float)($result['total'] ?? 0);
+			$current_total = (float)($total_sum ?? 0);
 			
 			if ($current_total + $percentage <= 100) {
 				$stmt = $mysqli->prepare("UPDATE tbl_criteria SET name = ?, percentage = ? WHERE id = ?");
