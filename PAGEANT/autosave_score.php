@@ -16,17 +16,28 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     exit;
 }
 
+// Accept both JSON and form-encoded POST
+$input = file_get_contents('php://input');
+$data = [];
+$contentType = $_SERVER['CONTENT_TYPE'] ?? '';
+if (stripos($contentType, 'application/json') !== false && $input) {
+    $data = json_decode($input, true) ?? [];
+} else {
+    $data = $_POST;
+}
+
 $judge_id = (int)$_SESSION['judge_id'];
 $year = (string)$_SESSION['judge_year'];
-$candidate_id = isset($_POST['candidate_id']) ? (int)$_POST['candidate_id'] : 0;
-$criteria_id = isset($_POST['criteria_id']) ? (int)$_POST['criteria_id'] : 0;
-$score_raw = isset($_POST['score']) ? $_POST['score'] : null;
+$candidate_id = isset($data['candidate_id']) ? (int)$data['candidate_id'] : 0;
+$criteria_id = isset($data['criteria_id']) ? (int)$data['criteria_id'] : 0;
+$score_raw = isset($data['score']) ? $data['score'] : null;
 
 if (!$candidate_id || !$criteria_id || $score_raw === null || $score_raw === '') {
     echo json_encode(['ok' => false, 'error' => 'params']);
     exit;
 }
 
+// Normalize numeric input (allow "1", "1.0", "1.00", etc.)
 if (!is_numeric($score_raw)) {
     echo json_encode(['ok' => false, 'error' => 'invalid_score']);
     exit;
@@ -94,6 +105,7 @@ if (!$stmt) {
     exit;
 }
 
+// bind: judge_id (i), candidate_id (i), criteria_id (i), score (d), year (s)
 $stmt->bind_param('iiids', $judge_id, $candidate_id, $criteria_id, $score, $year);
 if (!$stmt->execute()) {
     echo json_encode(['ok' => false, 'error' => 'db_execute', 'mysqli_error' => $stmt->error]);
