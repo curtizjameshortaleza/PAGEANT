@@ -42,40 +42,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $name = trim(get_post('criteria_name'));
         $percentage = (int)get_post('criteria_percentage');
         if ($year && $name && $percentage > 0 && $percentage <= 100) {
-            // Check if criteria name already exists for this year (compatible with non-mysqlnd builds)
-            $check_name = $mysqli->prepare("SELECT id FROM tbl_criteria WHERE name = ? AND year = ? LIMIT 1");
-            if ($check_name) {
-                $check_name->bind_param('ss', $name, $year);
-                $check_name->execute();
-                $check_name->store_result();
-                $existing = false;
-                if ($check_name->num_rows > 0) {
-                    $check_name->bind_result($existing_id);
-                    $check_name->fetch();
-                    $existing = true;
-                }
-                $check_name->close();
-            } else {
-                // DB prepare error
-                if (isset($_POST['ajax']) && $_POST['ajax'] === '1') {
-                    header('Content-Type: application/json');
-                    echo json_encode(['ok' => false, 'message' => 'Database error (prepare).']);
-                    exit;
-                }
-                header('Location: admin.php?year=' . urlencode($year) . '&msg=error:Database error.');
-                exit;
-            }
-            
-            if ($existing) {
-                // Duplicate name
-                if (isset($_POST['ajax']) && $_POST['ajax'] === '1') {
-                    header('Content-Type: application/json');
-                    echo json_encode(['ok' => false, 'message' => 'Criteria name "' . $name . '" already exists for this year.']);
-                    exit;
-                }
-                header('Location: admin.php?year=' . urlencode($year) . '&msg=error:Criteria name "' . $name . '" already exists for this year.');
-                exit;
-            } else {
+          
                 // Check total percentage doesn't exceed 100% (use bind_result to be compatible)
                 $check = $mysqli->prepare("SELECT COALESCE(SUM(percentage),0) as total FROM tbl_criteria WHERE year = ?");
                 if (!$check) {
@@ -124,7 +91,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     header('Location: admin.php?year=' . urlencode($year) . '&msg=error:Total percentage cannot exceed 100%. Current: ' . $current_total . '%, Adding: ' . $percentage . '%');
                     exit;
                 }
-            }
+            
         } else {
             if (isset($_POST['ajax']) && $_POST['ajax'] === '1') {
                 header('Content-Type: application/json');
@@ -1032,7 +999,7 @@ function top3_by_gender($overall, $gender) {
 			<form method="post" class="row g-2" onsubmit="return submitCriteriaAjax(event)">
 				<input type="hidden" name="action" value="add_criteria">
 				<input type="hidden" name="criteria_year" value="<?= h($sel_year) ?>">
-				<div class="col-5"><input type="text" name="criteria_name" class="form-control" placeholder="Name" required></div>
+				<div class="col-5"><input type="text" name="criteria_name" class="form-control" placeholder="Enter Criteria" required></div>
 				<div class="col-3"><input type="number" step="1" min="1" max="100" name="criteria_percentage" class="form-control" placeholder="%" required></div>
 				<div class="col-4"><button class="btn btn-primary w-100">Add to <?= h($sel_year) ?></button></div>
 			</form>
@@ -1057,7 +1024,7 @@ function top3_by_gender($overall, $gender) {
 					<table class="table table-hover">
 						<thead class="table-light">
 							<tr>
-								<th><i class="fas fa-list-check me-2"></i>Criteria Name</th>
+								<th><i class="fas fa-list-check me-2"></i>Criteria</th>
 								<th><i class="fas fa-percentage me-2"></i>Percentage</th>
 								<th><i class="fas fa-cog me-2"></i>Actions</th>
 							</tr>
@@ -1355,6 +1322,17 @@ function getCriteriaTotalPercent() {
     });
     return total;
 }
+function judgeNameExistsLocal(judgeName) {
+    const rows = document.querySelectorAll('#judgesCard tbody tr');
+    const target = (judgeName || '').trim().toLowerCase();
+    for (const row of rows) {
+        const el = row.querySelector('td .fw-semibold');
+        if (!el) continue;
+        const val = el.textContent.trim().toLowerCase();
+        if (val === target) return true;
+    }
+    return false;
+}
 
 function judgeNumberExistsLocal(judgeNumber) {
     const rows = document.querySelectorAll('#judgesCard tbody tr');
@@ -1392,7 +1370,7 @@ function submitCriteriaAjax(e) {
 	const pct = parseInt(form.querySelector('input[name="criteria_percentage"]').value, 10) || 0;
 
 	if (criteriaNameExists(name)) {
-		toast('Criteria name already exists.', 'error');
+		toast(`Criteria ${name} already exists.`, 'error');
 		return false;
 	}
 
@@ -1461,7 +1439,9 @@ function submitJudgeAjax(e) {
     const form = e.target;
     const year = form.querySelector('input[name="judge_year"]').value;
     const judgeNumber = form.querySelector('input[name="judge_number"]').value.trim();
-    if (judgeNumberExistsLocal(judgeNumber)) { toast('Judge number already exists', 'error'); return false; }
+	const judgeName = form.querySelector('input[name="judge_name"]').value.trim();
+    if (judgeNumberExistsLocal(judgeNumber)) { toast(`Judge number ${judgeNumber} already exists`, 'error'); return false; }
+	//if (judgeNameExistsLocal(judgeName)) { toast(`Judge name ${judgeName} already exists`, 'error'); return false; }
     const payload = new URLSearchParams(new FormData(form));
     payload.append('ajax', '1');
     fetch('admin.php?year=' + encodeURIComponent(year), {
