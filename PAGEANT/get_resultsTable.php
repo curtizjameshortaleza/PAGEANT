@@ -7,6 +7,14 @@ $sel_year = $_GET['year'] ?? '';
 if (!$sel_year) { $sel_year = ''; }
 
 // Load criteria and candidates for the year when invoked directly
+if (!isset($judges) || !is_array($judges)) {
+    $judges = [];
+    if ($sel_year) {
+        $res = $mysqli->query("SELECT * FROM tbl_judges WHERE year='".$mysqli->real_escape_string($sel_year)."' ORDER BY id ASC");
+        while ($row = $res->fetch_assoc()) $judges[] = $row;
+        $res->free();
+    }
+}
 if (!isset($criteria) || !is_array($criteria)) {
     $criteria = [];
     if ($sel_year) {
@@ -108,7 +116,7 @@ if (!isset($totals_by_candidate)) {
 		}
 	</style>
 
-<?php if ($sel_year && !empty($criteria) && !empty($candidates)): ?>
+<?php if ($sel_year && !empty($criteria) && !empty($candidates) && !empty($judges))  : ?>
 		<?php
 		$male_candidates = array_filter($candidates, function($c) { return $c['gender'] === 'Male'; });
 		$female_candidates = array_filter($candidates, function($c) { return $c['gender'] === 'Female'; });
@@ -597,13 +605,23 @@ if (!isset($totals_by_candidate)) {
 		<div class="alert alert-info">
 			<h5><i class="fas fa-info-circle"></i> Setup Required</h5>
 			<p class="mb-0">
-				<?php if (empty($criteria)): ?>
-					• Please add criteria first
-				<?php endif; ?>
-				<?php if (empty($candidates)): ?>
-					<?= empty($criteria) ? '<br>' : '' ?>• Please generate candidates
-				<?php endif; ?>
-				<br><small class="text-muted">Results will appear here once both criteria and candidates are set.</small>
+			<?php if (empty($criteria) && empty($candidates) && empty($judges)): ?>
+				• Please add criteria, generate candidates, and add judges.
+			<?php elseif (empty($criteria) && empty($candidates)): ?>
+				• Please add criteria and generate candidates.
+			<?php elseif (empty($criteria) && empty($judges)): ?>
+				• Please add criteria and add judges.
+			<?php elseif (empty($candidates) && empty($judges)): ?>
+				• Please generate candidates and add judges.
+			<?php elseif (empty($criteria)): ?>
+				• Please add criteria.
+			<?php elseif (empty($candidates)): ?>
+				• Please generate candidates.
+			<?php elseif (empty($judges)): ?>
+				• Please add judges.
+			<?php endif; ?>
+
+				<br><small class="text-muted">Results will appear here once both criteria, candidates, and judges are set.</small>
 			</p>
 		</div>
 	<?php endif; ?>
